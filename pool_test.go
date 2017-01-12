@@ -30,13 +30,15 @@ func (t *sleeptask) Run() {
 
 func TestWork(t *testing.T) {
 	wg := sync.WaitGroup{}
-	p := New(4, 8)
+	p := &Pool{MaxIdle: 4, MaxRunning: 8}
 	wg.Add(10)
 	for i := 0; i < 10; i++ {
 		p.Put(&sleeptask{&wg, i})
+		t.Logf("taskcnt %d", p.TaskCount())
 	}
 	wg.Wait()
 	t.Logf("%+v", p)
+	t.Logf("taskcnt %d", p.TaskCount())
 }
 
 type benchtask sync.WaitGroup
@@ -47,7 +49,7 @@ func (t *benchtask) Run() {
 
 func BenchmarkWork(b *testing.B) {
 	wg := sync.WaitGroup{}
-	p := New(4, 64)
+	p := &Pool{MaxIdle: 4, MaxRunning: 64}
 	wg.Add(b.N)
 	for i := 0; i < b.N; i++ {
 		p.Put((*benchtask)(&wg))

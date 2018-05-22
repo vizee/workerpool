@@ -15,39 +15,41 @@ type taskentry struct {
 	next *taskentry
 }
 
-// Pool 提供了一个动态数量的 worker 池
-type Pool struct {
-	mu         sync.Mutex
-	running    int
-	idle       int
-	MaxRunning int // 最大运行中 worker 数量
-	MaxIdle    int //最大空闲 worker 数量
-	head       *taskentry
-	tail       *taskentry
-	state      int32
-	taskcnt    uint32
-	cond       sync.Cond
-}
-
 var entrypool = sync.Pool{
 	New: func() interface{} {
-		return new(taskentry)
+		return &taskentry{}
 	},
 }
 
+// Pool 提供了一个动态数量的 worker 池
+type Pool struct {
+	mu         sync.Mutex
+	inited     int32
+	taskcnt    int32
+	head       *taskentry
+	tail       *taskentry
+	running    int
+	idle       int
+	MaxRunning int // 最大运行中 worker 数量
+	MaxIdle    int // 最大空闲 worker 数量
+	cond       sync.Cond
+}
+
+func (p *Pool) onceInit() {
+	p.mu.Lock()
+	if atomic.LoadInt32(&p.inited) == 0 {
+		p.cond.L = &p.mu
+		atomic.StoreInt32(&p.inited, 1)
+	}
+	p.mu.Unlock()
+}
+
 func (p *Pool) workerproc() {
-	// once init
-	if p.state == 0 {
-		p.mu.Lock()
-		if p.state == 0 {
-			p.cond.L = &p.mu
-			p.state = 1
-		}
-		p.mu.Unlock()
+	if atomic.LoadInt32(&p.inited) == 0 {
+		p.onceInit()
 	}
 
 	for {
-		// 从队列获取任务
 		p.mu.Lock()
 		for p.head == nil {
 			// 如果空闲 worker 足够, 其余 worker 退出, 否则进入等待
@@ -60,14 +62,16 @@ func (p *Pool) workerproc() {
 			}
 			p.cond.Wait()
 		}
+		// pop 任务
 		e := p.head
 		p.head = e.next
-		p.taskcnt--
 		p.mu.Unlock()
 
-		// just do it
 		e.t.Run()
 
+		atomic.AddInt32(&p.taskcnt, -1)
+
+		// 这两行代码不需要, GC 第一步直接清理 sync.Pool
 		e.t = nil
 		e.next = nil
 		entrypool.Put(e)
@@ -79,11 +83,13 @@ func (p *Pool) Put(t Task) {
 	if t == nil {
 		return
 	}
+	// 先增加任务数
+	atomic.AddInt32(&p.taskcnt, 1)
+
 	e := entrypool.Get().(*taskentry)
 	e.t = t
 	wakeidle := false
 
-	// 先增加任务数, 如果先 push
 	p.mu.Lock()
 	// 把任务加到队列
 	if p.head == nil {
@@ -93,7 +99,6 @@ func (p *Pool) Put(t Task) {
 		p.tail.next = e
 		p.tail = e
 	}
-	p.taskcnt++
 
 	// 调度 worker
 	if p.idle > 0 {
@@ -110,6 +115,7 @@ func (p *Pool) Put(t Task) {
 	}
 }
 
-func (p *Pool) TaskCount() uint32 {
-	return atomic.LoadUint32(&p.taskcnt)
+// TaskCount 返回 pending+running 的任务数量
+func (p *Pool) TaskCount() int32 {
+	return atomic.LoadInt32(&p.taskcnt)
 }
